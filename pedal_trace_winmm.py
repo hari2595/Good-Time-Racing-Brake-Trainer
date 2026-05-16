@@ -1,16 +1,13 @@
-# Pedal Trace  Windows (FINAL Modular Main)
+# Pedal Trace  Windows (Modular Main)
 # -----------------------------------------
-# UI runner wired to: backend_winmm.py, drills.py, coach.py
+# UI runner wired to: backend_winmm.py
 #
 # Features
 # • WinMM backend (joy.cpl layer) — no SDL/pygame/HID
 # • Big live graph (brake blue, throttle green) with top-right brake %
 # • Device picker, axis selectors, invert/deadzone/smoothing/window
-# • Start/Stop, Save CSV, Coach panel (right)
+# • Start/Stop, Save CSV
 # • Axis Monitor is a popup (open/close button)
-# • Drill engine: grades reps live, shows per‑rep feedback, 10‑in‑a‑row streak
-# • Coach button: uses ChatGPT if enabled (coach.py) or local fallback
-# • Beep on pass (drop your beep.wav into ./assets/beep.wav)
 #
 # Quick start:
 #   py -3 -m venv .venv
@@ -20,25 +17,19 @@
 from __future__ import annotations
 import os, time, csv
 from collections import deque
-from typing import Optional, Tuple
+
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from tkinter.scrolledtext import ScrolledText
-import winsound  # Windows sound API
 
 # --- Local modules ---
 from backend_winmm import AXIS_NAMES, Backend as WinMMBackend
-from drills import DrillConfig, DrillEngine, StreakTracker, feedback_for
-from coach import load_settings, coach_advice
 
 # ---- Paths (keep everything beside this file; works fine inside .venv) -----
 ROOT = os.path.dirname(os.path.abspath(__file__))
-ASSETS_DIR = os.path.join(ROOT, 'assets')
 DATA_DIR = os.path.join(ROOT, 'data')
 CONFIG_DIR = os.path.join(ROOT, 'config')
-BEEP_PATH = os.path.join(ASSETS_DIR, 'beep.wav')
-for _p in (ASSETS_DIR, DATA_DIR, CONFIG_DIR):
+for _p in (DATA_DIR, CONFIG_DIR):
     os.makedirs(_p, exist_ok=True)
 
 # ---- UI --------------------------------------------------------------------
@@ -46,28 +37,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('Pedal Trace — WinMM (Modular)')
-        self.geometry('1260x780')
+        self.geometry('500x220')
 
         # Backend
         self.backend = WinMMBackend()  # defaults: dev_id=0, brake='Y', throttle='X'
-
-        # Drill state
-        self.drill_cfg = DrillConfig(target_pct=80, app_goal='FAST', release_goal='MEDIUM',
-                                     band_tol=0.04, hold_required_ms=0)
-        self.drill: Optional[DrillEngine] = None
-        self.streak = StreakTracker(goal=10)
-        self.session_stats = {
-            "avg_ttb_ms": None,
-            "avg_release_ms": None,
-            "overshoots": 0,
-            "early_corrections": 0,
-            "release_bumps": 0,
-            "oscillations": 0,
-            "reps": 0,
-        }
-        self._ttb_accum = []
-        self._rel_accum = []
-        self._last_feedback = ""
 
         # Plot buffer
         self.buffer = deque(maxlen=120*60*5)
@@ -121,27 +94,13 @@ class App(tk.Tk):
         self.btn_stop  = ttk.Button(top, text='Stop', command=self.stop, state=tk.DISABLED)
         self.btn_stop.grid(row=4,column=2,sticky='w')
         ttk.Button(top, text='Save CSV', command=self.save_csv).grid(row=4,column=3,sticky='w')
-        ttk.Button(top, text='Coach', command=self.on_coach).grid(row=4,column=4,sticky='w', padx=6)
-        ttk.Button(top, text='Axis Monitor', command=self.toggle_axis_popup).grid(row=4,column=5,sticky='w', padx=6)
-        self.streak_label = ttk.Label(top, text="Streak 0/10")
-        self.streak_label.grid(row=4, column=6, sticky='w', padx=6)
+        ttk.Button(top, text='Axis Monitor', command=self.toggle_axis_popup).grid(row=4,column=4,sticky='w', padx=6)
 
-        # Split main area into left (graph) and right (coach box)
-        paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
-        left = ttk.Frame(paned); right = ttk.Frame(paned, width=380)
-        paned.add(left, weight=3); paned.add(right, weight=1)
-
-        self.canvas = tk.Canvas(left, bg='#0a0f19', highlightthickness=0, height=460)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.debug = ttk.Label(left, text='', foreground='#93a0b3')
-        self.debug.pack(anchor='w', padx=4, pady=(4,6))
-
-        ttk.Label(right, text='Coach', font=('Segoe UI', 11, 'bold')).pack(anchor='w')
-        self.coach_out = ScrolledText(right, height=20, wrap=tk.WORD)
-        self.coach_out.pack(fill=tk.BOTH, expand=True)
-        self.coach_out.insert('end', "No data yet. Press Start and do a few reps, then click Coach.\n")
-        self.coach_out.config(state='disabled')
+        # Graph area
+        self.canvas = tk.Canvas(self, bg='#0a0f19', highlightthickness=0, height=100)
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        self.debug = ttk.Label(self, text='', foreground='#93a0b3')
+        self.debug.pack(anchor='w', padx=12, pady=(0,6))
 
         try:
             ttk.Style().theme_use('clam')
@@ -198,23 +157,9 @@ class App(tk.Tk):
 
     # -- Run/plot ------------------------------------------------------------
     def start(self):
-        # Reset plot + drill state
         self.buffer.clear()
         self.btn_start.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
-
-        self.drill = DrillEngine(self.drill_cfg)
-        self.streak = StreakTracker(goal=10)
-        self.session_stats.update({
-            "avg_ttb_ms": None,
-            "avg_release_ms": None,
-            "overshoots": 0,
-            "early_corrections": 0,
-            "release_bumps": 0,
-            "oscillations": 0,
-            "reps": 0,
-        })
-        self._ttb_accum.clear(); self._rel_accum.clear(); self._last_feedback = ""
 
         # Reset backend filters
         try:
@@ -262,54 +207,6 @@ class App(tk.Tk):
             self.buffer.append((t,b,tb))
             self._draw()
             self.debug.config(text=f'Brake: {b:.3f}   Throttle: {tb:.3f}   Raw: {raw}')
-
-            # Drill grading
-            if self.drill is not None:
-                events = self.drill.update(t_ms=t, b=b)
-                for ev in events:
-                    if ev.get('type') == 'rep_complete':
-                        m = ev['metrics']
-                        passed = ev['passed']
-                        self.streak.note_rep(t_ms=t, passed=passed)
-                        self.streak_label.config(text=f"Streak {self.streak.streak}/{self.streak.goal}")
-
-                        # Aggregates
-                        self.session_stats["reps"] += 1
-                        if m.get("ttb_ms") is not None:
-                            self._ttb_accum.append(m["ttb_ms"])
-                            self.session_stats["avg_ttb_ms"] = sum(self._ttb_accum)/len(self._ttb_accum)
-                        if m.get("release_ms") is not None:
-                            self._rel_accum.append(m["release_ms"])
-                            self.session_stats["avg_release_ms"] = sum(self._rel_accum)/len(self._rel_accum)
-                        if (m.get("overshoot_pct") or 0) > 0:
-                            self.session_stats["overshoots"] += 1
-                        if m.get("early_correction"):
-                            self.session_stats["early_corrections"] += 1
-                        if m.get("release_bump"):
-                            self.session_stats["release_bumps"] += 1
-                        self.session_stats["oscillations"] += int(m.get("oscillations") or 0)
-
-                        # Per-rep feedback
-                        fb = feedback_for(m, self.drill_cfg)
-                        rep_no = self.session_stats["reps"]
-                        verdict = "PASS ✅" if passed else "FAIL ⚠️"
-                        self._last_feedback = (
-                            f"Rep {rep_no}: {verdict} · "
-                            f"TTB {m.get('ttb_ms') and int(m['ttb_ms'])} ms · "
-                            f"Rel {m.get('release_ms') and int(m['release_ms'])} ms\n{fb}"
-                        )
-                        # Show feedback immediately
-                        self.coach_out.config(state='normal')
-                        self.coach_out.delete('1.0', 'end')
-                        self.coach_out.insert('end', self._last_feedback)
-                        self.coach_out.config(state='disabled')
-
-                        # Beep on pass
-                        if passed and os.path.isfile(BEEP_PATH):
-                            try:
-                                winsound.PlaySound(BEEP_PATH, winsound.SND_FILENAME | winsound.SND_ASYNC)
-                            except Exception:
-                                pass
 
         # Keep looping while running
         if str(self.btn_stop['state']) == 'normal':
@@ -377,55 +274,6 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    # -- Coach panel ---------------------------------------------------------
-    def on_coach(self):
-        # Need at least some samples
-        if not self.buffer:
-            self.coach_out.config(state='normal')
-            self.coach_out.delete('1.0', 'end')
-            self.coach_out.insert('end', 'No data yet. Press Start and perform a few reps, then click Coach.')
-            self.coach_out.config(state='disabled')
-            return
-
-        # Build a compact summary from current session stats
-        ss = self.session_stats
-        rep_ct = ss.get("reps", 0)
-        avg_ttb = ss.get("avg_ttb_ms")
-        avg_rel = ss.get("avg_release_ms")
-        summary = [
-            f"Reps: {rep_ct}",
-            f"Avg TTB: {int(avg_ttb)} ms" if avg_ttb is not None else "Avg TTB: n/a",
-            f"Avg release: {int(avg_rel)} ms" if avg_rel is not None else "Avg release: n/a",
-            f"Overshoots: {ss.get('overshoots',0)}",
-            f"Early corrections: {ss.get('early_corrections',0)}",
-            f"Oscillations: {ss.get('oscillations',0)}",
-            f"Release bumps: {ss.get('release_bumps',0)}",
-        ]
-        summary_text = " · ".join(summary)
-
-        cfg_dict = {
-            "target_pct": self.drill_cfg.target_pct,
-            "app_goal": self.drill_cfg.app_goal,
-            "release_goal": self.drill_cfg.release_goal,
-            "band_tol_pct": self.drill_cfg.band_tol,
-            "hold_required_ms": self.drill_cfg.hold_required_ms,
-        }
-
-        settings = load_settings(CONFIG_DIR)
-        advice_text = coach_advice(
-            settings=settings,
-            recent_summary=summary_text,
-            drill_cfg=cfg_dict,
-            session_stats=self.session_stats
-        ) or "(No advice available)"
-
-        # Show in panel (include last rep feedback if present)
-        self.coach_out.config(state='normal')
-        self.coach_out.delete('1.0', 'end')
-        if self._last_feedback:
-            self.coach_out.insert('end', self._last_feedback + "\n\n")
-        self.coach_out.insert('end', advice_text)
-        self.coach_out.config(state='disabled')
 
 if __name__ == '__main__':
     app = App()
