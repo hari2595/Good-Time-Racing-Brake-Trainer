@@ -1,0 +1,16 @@
+{
+  "device_id": null,
+  "axis_brake": "X",
+  "axis_thr": "Y",
+  "invert_brake": false,
+  "invert_thr": false,
+  "deadzone_pct": 0.02,
+  "smoothing_alpha": 0.2,
+  "window_s": 8.0,
+  "mode": "daily",
+  "car": "GT",
+  "zone": "Random",
+  "tol_pct": 0.03,
+  "hold_ms": 10000,
+  "hold_req": "random"
+}
